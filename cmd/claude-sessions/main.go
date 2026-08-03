@@ -23,9 +23,6 @@ import (
 	"github.com/wahidustoz/claude-sessions/internal/ui"
 )
 
-// version is stamped at build time with -ldflags "-X main.version=v1.2.3".
-var version = "dev"
-
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "claude-sessions:", err)
@@ -45,7 +42,7 @@ func run() error {
 	flag.Parse()
 
 	if *showVer {
-		fmt.Println("claude-sessions", version)
+		fmt.Println("claude-sessions", buildVersion())
 		return nil
 	}
 
