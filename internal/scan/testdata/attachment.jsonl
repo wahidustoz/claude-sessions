@@ -1,0 +1,3 @@
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"real prompt"},"uuid":"u1","timestamp":"2026-07-04T09:00:00.000Z","cwd":"/usr","version":"2.1.0","gitBranch":"main"}
+{"parentUuid":"u1","isSidechain":false,"attachment":{"type":"hook_success","hookName":"SessionStart","content":"","stdout":"pretend this mentions \"type\":\"user\" inside"},"uuid":"at1","timestamp":"2026-07-04T09:00:01.000Z","cwd":"/usr","version":"2.1.0","gitBranch":"main"}
+{"parentUuid":"at1","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":"ok"},"uuid":"a1","timestamp":"2026-07-04T09:00:02.000Z","cwd":"/usr","version":"2.1.0","gitBranch":"main"}

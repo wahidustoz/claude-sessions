@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":"a"},"timestamp":"2026-07-12T10:00:00.000Z","cwd":"/etc","version":"2.1.0","gitBranch":"main"}
+{"type":"assistant","message":{"role":"assistant","content":"b"},"timestamp":"2026-07-12T10:00:01.000Z","cwd":"/var","version":"2.1.0","gitBranch":"main"}

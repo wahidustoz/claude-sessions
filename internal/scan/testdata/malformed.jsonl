@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-07-03T12:00:00.000Z","cwd":"/usr","version":"2.1.0","gitBranch":"main"}
+{"type":"ai-title","aiTitle":"broken but readab
+{"type":"assistant","message":{"role":"assistant","content":"y"},"timestamp":"2026-07-03T12:00:05.000Z","cwd":"/usr","version":"2.1.0","gitBranch":"main"}
+{"type":"ai-title","aiTitle":"Survived the bad line","sessionId":"dddd"}

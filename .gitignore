@@ -1,0 +1,12 @@
+# built binary
+/claude-sessions
+/dist/
+
+# go
+*.test
+*.out
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/

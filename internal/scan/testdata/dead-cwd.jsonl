@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":"x"},"timestamp":"2026-07-02T11:00:00.000Z","cwd":"/nonexistent--claude-worktrees-gone/proj","version":"2.1.0","gitBranch":"HEAD"}
+{"type":"ai-title","aiTitle":"Work in a deleted worktree","sessionId":"cccc"}
