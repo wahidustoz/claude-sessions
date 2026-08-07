@@ -179,31 +179,64 @@ table)
 		if (a < 86400) return int(a / 3600) "h"
 		return int(a / 86400) "d"
 	}
+	# Quoting for the system() call below. Built with sprintf because the awk
+	# program itself is inside single quotes.
+	function q(s,   Q, BS, n, parts, out, i) {
+		Q = sprintf("%c", 39); BS = sprintf("%c", 92)
+		if (s ~ /^[A-Za-z0-9\/._~+,:@%=-]+$/) return s
+		n = split(s, parts, Q)
+		out = parts[1]
+		for (i = 2; i <= n; i++) out = out Q BS Q Q parts[i]
+		return Q out Q
+	}
 	function cut(s, n) { return (length(s) <= n) ? s : substr(s, 1, n - 1) "~" }
-	function pad(s, n) { return (length(s) >= n) ? s : s sprintf("%" (n - length(s)) "s", "") }
+	function padl(s, n) { return (length(s) >= n) ? s : s sprintf("%" (n - length(s)) "s", "") }
+	function padr(s, n) { return (length(s) >= n) ? s : sprintf("%" (n - length(s)) "s", "") s }
+	function count(m) {
+		if (m < 10000) return m
+		if (m < 1000000) return int(m / 1000) "k"
+		return "999k+"
+	}
 	function shorten(p,   h) {
 		h = ENVIRON["HOME"]
 		if (h != "" && p == h) return "~"
 		if (h != "" && index(p, h "/") == 1) return substr(p, length(h) + 2)
 		return p
 	}
-	BEGIN {
-		aw = 4; pw = 26; bw = 12; mw = 5
-		tw = width - (2 + aw + 1 + pw + 1 + bw + 1 + mw + 1)
-		if (tw < 10) { bw = 0; tw = width - (2 + aw + 1 + pw + 1 + mw + 1) }
-		if (tw < 10) { pw = 14; tw = width - (2 + aw + 1 + pw + 1 + mw + 1) }
-		if (tw < 6) tw = 6
-		line = "  " pad("AGE", aw) " " pad("PROJECT", pw) " "
-		if (bw) line = line pad("BRANCH", bw) " "
-		print line pad("TITLE", tw) " " sprintf("%" mw "s", "MSGS")
-	}
+	# Rows are buffered so the project column can be sized to its content, the way
+	# the compiled picker does. The branch is shown inline, since it is a detached
+	# HEAD for most sessions and a column of blanks reads as a gap.
 	{
-		proj = shorten($3)
-		if ($3 == "" || system("test -d \"" $3 "\"") != 0) proj = "x " proj
-		br = ($4 == "HEAD") ? "" : $4
-		row = "  " sprintf("%" aw "s", age($2)) " " pad(cut(proj, pw), pw) " "
-		if (bw) row = row pad(cut(br, bw), bw) " "
-		print row pad(cut($5, tw), tw) " " sprintf("%" mw "s", $6)
+		n++
+		a[n] = $2; ttl[n] = $5; msg[n] = $6
+		p = shorten($3)
+		if ($4 != "HEAD" && $4 != "") p = p " (" $4 ")"
+		disp[n] = p
+		if (length(p) > pw) pw = length(p)
+		if ($3 == "") { gone[n] = 1 } else {
+			if (!($3 in known)) known[$3] = (system("test -d " q($3)) == 0)
+			gone[n] = !known[$3]
+		}
+	}
+	END {
+		aw = 4; mw = 5
+		if (pw > 30) pw = 30
+		if (pw < 6) pw = 6
+		showmsg = 1
+		tw = width - (2 + aw + 1 + 1 + 1 + pw + 1 + mw + 1)
+		if (tw < 10) { showmsg = 0; tw = width - (2 + aw + 1 + 1 + 1 + pw + 1) }
+		while (pw > 6 && tw < 10) { pw--; tw++ }
+		if (tw < 6) tw = 6
+
+		head = "  " padr("AGE", aw) "   " padr("PROJECT", pw) " " padl("TITLE", tw)
+		if (showmsg) head = head " " padr("MSGS", mw)
+		print head
+		for (i = 1; i <= n; i++) {
+			row = "  " padr(age(a[i]), aw) " " (gone[i] ? "x" : " ") " " \
+			      padr(cut(disp[i], pw), pw) " " padl(cut(ttl[i], tw), tw)
+			if (showmsg) row = row " " padr(count(msg[i]), mw)
+			print row
+		}
 	}'
 	;;
 esac

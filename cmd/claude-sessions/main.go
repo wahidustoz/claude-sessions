@@ -74,6 +74,7 @@ func run() error {
 	defer closeTTY()
 
 	model := ui.New(res.Sessions, res.Skipped, now)
+	model.Style = ui.NewStyler(ttyOut)
 	final, err := tea.NewProgram(model, tea.WithInput(ttyIn), tea.WithOutput(ttyOut)).Run()
 	if err != nil {
 		return err
@@ -107,11 +108,12 @@ func usage() {
 usage: claude-sessions [flags]
 
 keys:
-  ↑↓ / jk    move          g / G    first / last
-  ⏎          print the resume command for this session and stay open
-  y          copy the resume command to the clipboard
-  /          filter on project, title, last prompt, or branch
-  q          quit
+  type       filter on project, title, last prompt, or branch as you type
+  ↑↓ / ^N ^P  move
+  ⏎          copy the resume command, print it, and stay open
+  ^U         clear the query
+  esc        clear the query, or quit when it is already empty
+  ^C         quit
 
 flags:
 `)

@@ -1,4 +1,5 @@
-// Package render writes session listings for non-interactive output.
+// Package render lays out session listings. Widths are computed on plain text so
+// that callers can colour individual cells without breaking the arithmetic.
 package render
 
 import (
@@ -11,14 +12,43 @@ import (
 	"github.com/wahidustoz/claude-sessions/internal/scan"
 )
 
-// Column widths shared by the table renderer and the TUI, so both line up.
 const (
+	CursorWidth  = 1
+	TickWidth    = 1
 	AgeWidth     = 4
-	BranchWidth  = 12
+	MissingWidth = 1
 	MsgsWidth    = 5
-	ProjectWidth = 26
-	MinTitle     = 10
+
+	// MaxProject caps the project column so one deeply nested path cannot
+	// squeeze the title, which is the field that actually identifies a session.
+	MaxProject = 30
+	MinProject = 6
+	MinTitle   = 10
+
+	// BranchMark prefixes an inline branch, which is shown instead of given its
+	// own column because it is detached HEAD for most sessions.
+	BranchMark = "⑂"
 )
+
+// CellKind identifies a field so callers can style it.
+type CellKind int
+
+const (
+	CellCursor CellKind = iota
+	CellTick
+	CellAge
+	CellMissing
+	CellProject
+	CellBranch
+	CellTitle
+	CellMsgs
+)
+
+// Cell is one field of a row, already padded to its final width.
+type Cell struct {
+	Text string
+	Kind CellKind
+}
 
 // Age renders a duration coarsely: the reader wants "2h", not "2h13m47s".
 func Age(d time.Duration) string {
@@ -34,63 +64,169 @@ func Age(d time.Duration) string {
 	}
 }
 
-// Layout is the resolved per-column widths for a given terminal width.
-type Layout struct {
-	Project, Branch, Title int
-	ShowBranch, ShowMsgs   bool
+// Count renders a message count inside MsgsWidth. Big counts are abbreviated
+// rather than truncated, because a cut-off number reads as a different number.
+func Count(n int) string {
+	switch {
+	case n < 10000:
+		return fmt.Sprintf("%d", n)
+	case n < 1000000:
+		return fmt.Sprintf("%dk", n/1000)
+	default:
+		return "999k+"
+	}
 }
 
-// Fit decides which columns survive at the given width. Narrow terminals lose
-// the branch and message columns before the title starts shrinking.
-func Fit(width int) Layout {
+// Bucket groups a session under a coarse heading. It counts calendar days, not
+// elapsed hours, so a session from late last night reads as "yesterday".
+func Bucket(ts, now time.Time) string {
+	day := func(t time.Time) time.Time {
+		t = t.In(now.Location())
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, now.Location())
+	}
+	days := int(day(now).Sub(day(ts)).Hours() / 24)
+	switch {
+	case days <= 0: // future timestamps are clock skew, not a new bucket
+		return "today"
+	case days == 1:
+		return "yesterday"
+	case days < 7:
+		return "this week"
+	case days < 14:
+		return "last week"
+	default:
+		return "older"
+	}
+}
+
+// Layout is the resolved per-column widths for a given terminal width.
+type Layout struct {
+	Project, Title int
+	ShowMsgs       bool
+}
+
+// branchSuffix is what gets appended to a project when the branch is meaningful.
+// A detached HEAD tells the reader nothing, so it is omitted.
+func branchSuffix(s scan.Session) string {
+	if s.Branch == "" || s.Branch == "HEAD" {
+		return ""
+	}
+	return " " + BranchMark + s.Branch
+}
+
+// Fit sizes the columns for a width, given the sessions that will be shown. The
+// project column is sized to its content instead of a fixed reservation, and the
+// message count is dropped before the title is squeezed.
+func Fit(width int, sessions []scan.Session) Layout {
 	if width < 20 {
 		width = 20
 	}
-	l := Layout{Project: ProjectWidth, Branch: BranchWidth, ShowBranch: true, ShowMsgs: true}
 
-	// marker(2) + age + gap + project + gap + branch + gap + title + gap + msgs
-	fixed := func(l Layout) int {
-		n := 2 + AgeWidth + 1 + l.Project + 1
-		if l.ShowBranch {
-			n += l.Branch + 1
-		}
-		if l.ShowMsgs {
+	project := projectWidth(sessions)
+
+	// cursor tick ' ' age ' ' missing ' ' project ' ' title [' ' msgs]
+	fixed := func(project int, msgs bool) int {
+		n := CursorWidth + TickWidth + 1 + AgeWidth + 1 + MissingWidth + 1 + project + 1
+		if msgs {
 			n += MsgsWidth + 1
 		}
 		return n
 	}
-	if width-fixed(l) < MinTitle {
-		l.ShowBranch = false
-	}
-	if width-fixed(l) < MinTitle {
+
+	l := Layout{Project: project, ShowMsgs: true}
+	if width-fixed(l.Project, true) < MinTitle {
 		l.ShowMsgs = false
 	}
-	if rest := width - fixed(l); rest < MinTitle {
-		// Give the project column back space so the title stays readable.
-		l.Project += rest - MinTitle
-		if l.Project < 6 {
-			l.Project = 6
-		}
+	for l.Project > MinProject && width-fixed(l.Project, l.ShowMsgs) < MinTitle {
+		l.Project--
 	}
-	l.Title = width - fixed(l)
+	l.Title = width - fixed(l.Project, l.ShowMsgs)
 	if l.Title < 1 {
 		l.Title = 1
 	}
 	return l
 }
 
-// Header is the column header line.
+// projectWidth sizes the column to its widest value, capped. Since the column is
+// right-aligned, extra width only shows up as indentation on the short rows, so
+// there is no reason to truncate a path that would otherwise fit.
+func projectWidth(sessions []scan.Session) int {
+	n := 0
+	for _, s := range sessions {
+		if w := len([]rune(s.Project() + branchSuffix(s))); w > n {
+			n = w
+		}
+	}
+	if n > MaxProject {
+		n = MaxProject
+	}
+	if n < MinProject {
+		n = MinProject
+	}
+	return n
+}
+
+// Cells renders one session as padded fields. cursor and tick are single-rune
+// markers supplied by the caller.
+func Cells(s scan.Session, now time.Time, l Layout, cursor, tick string) []Cell {
+	missing := " "
+	if !s.CwdExists {
+		missing = "✗"
+	}
+
+	// The project and its branch share one column: the project takes what it
+	// needs, the branch fills whatever is left.
+	suffix := branchSuffix(s)
+	project := s.Project()
+	if len([]rune(project))+len([]rune(suffix)) > l.Project {
+		if room := l.Project - len([]rune(suffix)); room >= MinProject {
+			project = truncate(project, room)
+		} else {
+			project, suffix = truncate(project, l.Project), ""
+		}
+	}
+	// The project and branch are right-aligned as a pair, so a short project ends
+	// up flush against the title it labels instead of separated from it by a gap.
+	// The slack lands on the left, next to the age, where it reads as breathing
+	// room rather than as a void.
+	if slack := l.Project - len([]rune(project)) - len([]rune(suffix)); slack > 0 {
+		project = strings.Repeat(" ", slack) + project
+	}
+
+	cells := []Cell{
+		{pad(cursor, CursorWidth), CellCursor},
+		{pad(tick, TickWidth), CellTick},
+		{" " + lpad(Age(s.Age(now)), AgeWidth) + " ", CellAge},
+		{pad(missing, MissingWidth) + " ", CellMissing},
+		{project, CellProject},
+		{suffix, CellBranch},
+		{" " + pad(truncate(s.DisplayTitle(), l.Title), l.Title), CellTitle},
+	}
+	if l.ShowMsgs {
+		cells = append(cells, Cell{" " + lpad(Count(s.Messages), MsgsWidth), CellMsgs})
+	}
+	return cells
+}
+
+// Row is the plain-text rendering of one session.
+func Row(s scan.Session, now time.Time, l Layout, cursor, tick string) string {
+	var b strings.Builder
+	for _, c := range Cells(s, now, l, cursor, tick) {
+		b.WriteString(c.Text)
+	}
+	return strings.TrimRight(b.String(), " ")
+}
+
+// Header is the column header line, used by the plain table only. The picker
+// relies on colour and day headings instead.
 func Header(l Layout) string {
 	var b strings.Builder
-	b.WriteString("  ")
-	b.WriteString(pad("AGE", AgeWidth))
+	b.WriteString(strings.Repeat(" ", CursorWidth+TickWidth+1))
+	b.WriteString(lpad("AGE", AgeWidth))
 	b.WriteString(" ")
-	b.WriteString(pad("PROJECT", l.Project))
+	b.WriteString(strings.Repeat(" ", MissingWidth+1))
+	b.WriteString(lpad("PROJECT", l.Project))
 	b.WriteString(" ")
-	if l.ShowBranch {
-		b.WriteString(pad("BRANCH", l.Branch))
-		b.WriteString(" ")
-	}
 	b.WriteString(pad("TITLE", l.Title))
 	if l.ShowMsgs {
 		b.WriteString(" ")
@@ -99,46 +235,19 @@ func Header(l Layout) string {
 	return strings.TrimRight(b.String(), " ")
 }
 
-// Row renders one session. The marker column carries the caller's cursor or tick.
-func Row(s scan.Session, now time.Time, l Layout, marker string) string {
-	project := s.Project()
-	if !s.CwdExists {
-		project = "✗ " + project
-	}
-	var b strings.Builder
-	b.WriteString(pad(marker, 2))
-	b.WriteString(lpad(Age(s.Age(now)), AgeWidth))
-	b.WriteString(" ")
-	b.WriteString(pad(truncate(project, l.Project), l.Project))
-	b.WriteString(" ")
-	if l.ShowBranch {
-		branch := s.Branch
-		if branch == "HEAD" {
-			branch = "" // detached HEAD tells the reader nothing
-		}
-		b.WriteString(pad(truncate(branch, l.Branch), l.Branch))
-		b.WriteString(" ")
-	}
-	b.WriteString(pad(truncate(s.DisplayTitle(), l.Title), l.Title))
-	if l.ShowMsgs {
-		b.WriteString(" ")
-		b.WriteString(lpad(fmt.Sprintf("%d", s.Messages), MsgsWidth))
-	}
-	return strings.TrimRight(b.String(), " ")
-}
-
-// Table writes a plain listing, for piping or a dumb terminal.
+// Table writes a plain listing, for piping or a dumb terminal. It stays flat and
+// uncoloured: this output gets parsed and redirected.
 func Table(w io.Writer, sessions []scan.Session, now time.Time, width int) error {
 	if len(sessions) == 0 {
 		_, err := fmt.Fprintln(w, "no Claude Code sessions found")
 		return err
 	}
-	l := Fit(width)
+	l := Fit(width, sessions)
 	if _, err := fmt.Fprintln(w, Header(l)); err != nil {
 		return err
 	}
 	for _, s := range sessions {
-		if _, err := fmt.Fprintln(w, Row(s, now, l, "")); err != nil {
+		if _, err := fmt.Fprintln(w, Row(s, now, l, " ", " ")); err != nil {
 			return err
 		}
 	}

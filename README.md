@@ -8,16 +8,24 @@ Claude Code's own `--resume` only shows sessions for the directory you are
 standing in. This shows all of them, from anywhere.
 
 ```
-  claude sessions · 41 sessions · 2 printed
-  AGE  PROJECT                    BRANCH       TITLE                                            MSGS
-▸  now projects/api                main         Fix pagination on the search endpoint             142
- ✓ 16m projects/web                feat/upload  Remove the legacy upload path                      88
-    3d projects/infra              main         Audit the billing reconciliation job              310
-    5d ✗ projects/old-worktree                  Trace the duplicate webhook deliveries             47
-  ↑↓ move · ⏎ print resume cmd · y copy · / filter · q quit
+> upload                                              12/59 · 1 printed · copied ✓
+  today
+▸  now                       projects/api Fix pagination on the search endpoint          142
+✓  16m       projects/web (feat/upload)   Remove the legacy upload path                   88
+  yesterday
+    1d                     projects/infra Audit the billing reconciliation job           310
+  older
+   35d ✗          projects/old-worktree   Trace the duplicate webhook deliveries           47
+  ↑↓ move · ⏎ copy + print · ^U clear · esc back · ^C quit
 ```
 
+Sessions are grouped by day, the title is the only thing drawn bright, and the
+project is right-aligned so it sits against the title it labels. Branches appear
+inline and only when they are not a detached `HEAD`, which is most of the time.
 `✗` marks a session whose directory no longer exists, usually a deleted worktree.
+
+Colour comes from the terminal's own palette, so it works on light and dark
+themes, and switches off under `NO_COLOR` or when output is not a terminal.
 
 ## Install
 
@@ -58,9 +66,12 @@ claude-sessions.sh --cmds       # resume commands, newest first
 ```
 
 It emits byte-identical resume commands to the binary, verified on every commit.
-It has no interactive picker and is roughly ten times slower (about 4.6s over
-219 MB of transcripts, against 0.5s cold and 4ms warm for the binary), so use it
-only where a binary is not an option.
+It has no interactive picker, no colour, and no day grouping, and is roughly ten
+times slower (about 4.6s over 219 MB of transcripts, against 0.5s cold and 4ms
+warm for the binary), so use it only where a binary is not an option. Its table
+matches the binary's columns, but marks a missing directory with `x` and shows
+branches as `(branch)`, because `awk` measures bytes rather than characters and
+non-ASCII would break the alignment.
 
 ## Usage
 
@@ -72,11 +83,31 @@ claude-sessions --json | jq .    # full records
 claude-sessions --refresh        # re-read every transcript, ignoring the cache
 ```
 
-Keys: `↑↓`/`jk` move, `g`/`G` first/last, `⏎` print the resume command and stay
-open, `y` copy it to the clipboard, `/` filter, `q` quit.
+### Keys
 
-`⏎` deliberately does not exit, so you can collect several sessions in one pass
-and paste each into its own terminal. Rows you have already printed show `✓`.
+Typing searches immediately, with no mode to enter first.
+
+| | |
+|---|---|
+| any character | filter as you type |
+| `↑` `↓` `^N` `^P` | move |
+| `⏎` | copy the resume command, print it, stay open |
+| `^U` | clear the query |
+| `Esc` | clear the query, or quit when it is already empty |
+| `^C` | quit |
+
+Because typing is search, `j`, `k`, `q`, `g` and `G` are ordinary characters, and
+so is `/` — useful, since queries like `dev/api` are common.
+
+The query splits on spaces and every token must match somewhere in the project,
+title, last prompt, branch, or session id, in any order. So `upload legacy` finds
+a session whose project says one and whose title says the other.
+
+`⏎` copies the resume command to the clipboard *and* prints it, then leaves the
+picker open, so you can collect several in one pass and paste each into its own
+terminal. The clipboard holds the most recent pick and picked rows show `✓`. If no
+clipboard helper is available the command is still printed, and the header says so
+rather than silently losing the pick.
 
 A handy shell function, since `eval` needs the command on stdout:
 
@@ -108,6 +139,13 @@ the right directory 55 times; the last-seen `cwd` would have been wrong 20 times
 
 **Titles** come from the transcript's most recent `ai-title` record, falling back
 to the last prompt, then to `(untitled)`.
+
+**Column widths** are computed on plain text before any colour is applied, so
+escape sequences can never disturb the alignment. The project column is sized to
+its widest value up to a cap; because it is right-aligned, a wide column costs
+only title width rather than leaving a visible gap, so no path is truncated that
+would otherwise fit. Message counts are abbreviated (`12k`) rather than truncated,
+since a cut-off number reads as a different number.
 
 **Output streams.** The picker draws on `/dev/tty`, never on stdout, so resume
 commands stay usable in a pipeline. Each chosen command is echoed above the live

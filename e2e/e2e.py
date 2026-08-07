@@ -8,6 +8,7 @@ keystrokes. This covers what unit tests cannot: that the picker draws on the
 terminal and never on stdout, that resume commands land on stdout only when stdout
 is not a terminal, and that keys behave against a real terminal driver.
 """
+import datetime
 import fcntl
 import json
 import os
@@ -27,6 +28,7 @@ BIN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
 ROWS, COLS = 30, 120
 
 DOWN, UP, ENTER, ESC = b"\x1b[B", b"\x1b[A", b"\r", b"\x1b"
+CTRL_C, CTRL_U = b"\x03", b"\x15"
 
 
 # --------------------------------------------------------------------- fixture
@@ -35,7 +37,19 @@ def project_key(path):
     return re.sub(r"[^A-Za-z0-9_-]", "-", path)
 
 
-def transcript(cwd, branch, title, prompt, day, turns):
+# Buckets are calendar based, so the fixture is anchored to local midnight rather
+# than to fixed dates. That keeps "today" / "yesterday" / "older" deterministic
+# whatever day the suite runs, with no midnight race.
+def midnight():
+    return datetime.datetime.now().astimezone().replace(
+        hour=0, minute=0, second=0, microsecond=0)
+
+
+def stamp(dt):
+    return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def transcript(cwd, branch, title, prompt, base, turns):
     """One transcript: alternating turns, then the trailing metadata records."""
     lines = [{"type": "mode", "mode": "normal"}]
     for i in range(turns):
@@ -43,14 +57,14 @@ def transcript(cwd, branch, title, prompt, day, turns):
         lines.append({
             "parentUuid": None, "isSidechain": False, "type": role,
             "message": {"role": role, "content": f"turn {i}"},
-            "uuid": f"u{i}", "timestamp": f"2026-07-{day:02d}T10:{i:02d}:00.000Z",
+            "uuid": f"u{i}", "timestamp": stamp(base + datetime.timedelta(minutes=i)),
             "cwd": cwd, "version": "2.1.201", "gitBranch": branch,
         })
     # An attachment record, which must not be counted as a turn.
     lines.append({
         "parentUuid": "u0", "isSidechain": False,
         "attachment": {"type": "hook_success", "stdout": 'contains "type":"user" inside'},
-        "uuid": "at0", "timestamp": f"2026-07-{day:02d}T10:59:00.000Z",
+        "uuid": "at0", "timestamp": stamp(base + datetime.timedelta(minutes=59)),
         "cwd": cwd, "version": "2.1.201", "gitBranch": branch,
     })
     lines.append({"type": "last-prompt", "lastPrompt": prompt, "leafUuid": "u0"})
@@ -62,11 +76,15 @@ def transcript(cwd, branch, title, prompt, day, turns):
     return "\n".join(json.dumps(o, separators=(",", ":")) for o in lines) + "\n"
 
 
-# name, branch, title, last prompt, July day, turns, directory still exists
+# name, branch, title, last prompt, offset from local midnight, turns, dir exists.
+# The offsets put one session in each of three day buckets, newest first.
 SESSIONS = [
-    ("alpha", "main", "Fix pagination on the search endpoint", "recheck record 4821004", 20, 6, True),
-    ("beta", "develop", "Remove the legacy upload path", "ship it", 15, 4, True),
-    ("vanished", "HEAD", "Trace the duplicate webhook deliveries", "still duplicating", 10, 2, False),
+    ("alpha", "main", "Fix pagination on the search endpoint", "recheck record 4821004",
+     datetime.timedelta(hours=1), 6, True),
+    ("beta", "develop", "Remove the legacy upload path", "ship it",
+     datetime.timedelta(hours=-2), 4, True),
+    ("vanished", "HEAD", "Trace the duplicate webhook deliveries", "still duplicating",
+     datetime.timedelta(days=-20), 2, False),
 ]
 
 
@@ -77,7 +95,8 @@ def build_fixture(base):
     os.makedirs(root)
     os.makedirs(work)
     ids = {}
-    for i, (name, branch, title, prompt, day, turns, exists) in enumerate(SESSIONS):
+    base0 = midnight()
+    for i, (name, branch, title, prompt, offset, turns, exists) in enumerate(SESSIONS):
         cwd = os.path.join(work, name)
         if exists:
             os.makedirs(cwd)
@@ -86,7 +105,7 @@ def build_fixture(base):
         d = str(i + 1) * 8
         sid = f"{d}-1111-2222-3333-444444444444"
         with open(os.path.join(pdir, sid + ".jsonl"), "w") as fh:
-            fh.write(transcript(cwd, branch, title, prompt, day, turns))
+            fh.write(transcript(cwd, branch, title, prompt, base0 + offset, turns))
         ids[name] = (sid, cwd)
 
     # A subagent transcript, which must be counted but never listed as a session.
@@ -95,7 +114,7 @@ def build_fixture(base):
     os.makedirs(sub)
     with open(os.path.join(sub, "agent-a1.jsonl"), "w") as fh:
         fh.write('{"type":"user","message":{"role":"user","content":"sub"},'
-                 '"timestamp":"2026-07-20T10:30:00.000Z"}\n')
+                 '"timestamp":"' + stamp(base0) + '"}\n')
 
     # An unreadable (empty) transcript, which must be counted and skipped.
     empty = os.path.join(root, "-empty-project")
@@ -201,6 +220,18 @@ def clean(s):
     return ANSI.sub("", s)
 
 
+def heading_line(vis, name):
+    """Index of the first line that is exactly a day heading.
+
+    Substring search would be wrong: the temp directory path contains "folders",
+    which holds "older".
+    """
+    for i, line in enumerate(vis.split("\n")):
+        if line.strip() == name:
+            return i
+    return -1
+
+
 failures = []
 
 
@@ -229,50 +260,83 @@ def main():
         alpha_cmd, beta_cmd, gone_cmd = cmd("alpha"), cmd("beta"), cmd("vanished")
 
         print("\n=== A: interactive run, stdout is the terminal ===")
-        tty, out = run([DOWN, ENTER, ENTER, b"G", ENTER, b"q"], root)
+        # G and q are search characters now, so movement is arrows only.
+        tty, out = run([DOWN, ENTER, ENTER, DOWN, ENTER, ESC], root)
         vis = clean(tty)
         cmds = re.findall(r"cd \S+ && claude --resume \S+", vis)
         for c in cmds:
             print("        emitted: " + c)
 
-        check("header drawn", "PROJECT" in vis and "TITLE" in vis, vis[-1200:])
-        check("key hints drawn", "q quit" in vis, vis[-600:])
+        check("key hints drawn", "quit" in vis and "move" in vis, vis[-600:])
         check("cursor marker present", "▸" in vis)
         check("newest session listed first",
               "Fix pagination" in vis and "Remove the legacy" in vis
               and vis.index("Fix pagination") < vis.index("Remove the legacy"), vis[:900])
-        check("subagent transcript not counted as a session", "3 sessions" in vis, vis[:300])
+        check("subagent transcript not counted as a session", "3/3" in vis, vis[:300])
         check("unreadable transcript reported", "1 unreadable" in vis, vis[:300])
         check("missing directory marked", "✗" in vis, vis[:900])
         check("enter emitted the row below the cursor", cmds[:1] == [beta_cmd], repr(cmds[:1]))
-        check("G then enter emitted the last row", cmds[1:2] == [gone_cmd], repr(cmds[1:2]))
+        check("moving down again emitted the last row", cmds[1:2] == [gone_cmd], repr(cmds[1:2]))
         check("duplicate enter did not re-print", len(cmds) == 2, repr(cmds))
         check("printed counter shown", "printed" in vis, vis[:300])
         check("nothing written to stdout separately", out == "", repr(out[:300]))
+        heads = {h: heading_line(vis, h) for h in ("today", "yesterday", "older")}
+        check("sessions grouped under day headings",
+              all(v >= 0 for v in heads.values()), f"{heads}\n{vis[:600]}")
+        check("day headings are ordered newest first",
+              heads["today"] < heads["yesterday"] < heads["older"], f"{heads}\n{vis[:600]}")
+        check("no column header row in the picker",
+              "PROJECT" not in vis and "MSGS" not in vis, vis[:400])
+        check("rows are coloured on a real terminal",
+              re.search(r"\x1b\[[0-9;]*m", tty) is not None)
+        # The clipboard is reported either way; CI Linux has no clipboard helper.
+        check("selection reports the clipboard outcome",
+              "copied" in vis or "clipboard" in vis, vis[:400])
+
+        print("\n=== A2: typing goes straight to search, with no / prefix ===")
+        tty, out = run([b"l", b"e", b"g", b"a", b"c", b"y", ENTER, CTRL_C], root, pipe_stdout=True)
+        vis = clean(tty)
+        piped = [l for l in out.splitlines() if l.strip()]
+        check("query shown as a prompt", "> legacy" in vis, vis[:400])
+        check("typing filtered without pressing /", piped == [beta_cmd], repr(piped))
+
+        print("\n=== A3: multi-token search matches in any order ===")
+        tty, out = run([b"u", b"p", b"l", b"o", b"a", b"d", b" ", b"l", b"e", b"g", b"a", b"c", b"y",
+                        ENTER, CTRL_C], root, pipe_stdout=True)
+        piped = [l for l in out.splitlines() if l.strip()]
+        check("both tokens had to match", piped == [beta_cmd], repr(piped))
 
         print("\n=== B: stdout is a pipe (the eval case) ===")
-        tty, out = run([b"/", b"b", b"e", b"t", b"a", ENTER, b"q"], root, pipe_stdout=True)
+        tty, out = run([b"b", b"e", b"t", b"a", ENTER, CTRL_C], root, pipe_stdout=True)
         vis = clean(tty)
         piped = [l for l in out.splitlines() if l.strip()]
         print("        stdout: " + (repr(piped) if piped else "(none)"))
 
-        check("filter box appeared", "/beta" in vis, vis[-700:])
+        check("query echoed in the prompt", "> beta" in vis, vis[-700:])
         check("stdout holds exactly the filtered session", piped == [beta_cmd], repr(piped))
         check("stdout carries no ANSI escapes", "\x1b" not in out, repr(out[:200]))
         check("stdout has no TUI chrome", "PROJECT" not in out and "▸" not in out, repr(out[:200]))
 
         print("\n=== C: quit without choosing anything ===")
-        tty, out = run([DOWN, DOWN, b"q"], root, pipe_stdout=True)
+        tty, out = run([DOWN, DOWN, ESC], root, pipe_stdout=True)
         check("stdout empty when nothing was picked", out.strip() == "", repr(out[:200]))
 
-        print("\n=== D: filter matching nothing, then escape ===")
-        tty, out = run([b"/", b"z", b"z", b"q", b"z", ESC, b"q"], root, pipe_stdout=True)
+        print("\n=== D: query matching nothing, then escape twice ===")
+        # "q" is typed into the query here; only esc leaves.
+        tty, out = run([b"z", b"z", b"q", b"z", ESC, ESC], root, pipe_stdout=True)
         vis = clean(tty)
         check("no-match message shown", "no match" in vis, vis[-700:])
-        check("q inside the filter did not quit early", "no match" in vis)
-        check("esc restored the full list",
+        check("q was typed into the query, not treated as quit", "no match" in vis)
+        check("first esc restored the full list",
               "Fix pagination" in vis.split("no match")[-1], vis[-900:])
         check("stdout still empty", out.strip() == "", repr(out[:200]))
+
+        print("\n=== D2: ctrl-u clears the query outright ===")
+        tty, out = run([b"b", b"e", b"t", b"a", CTRL_U, ESC], root, pipe_stdout=True)
+        vis = clean(tty)
+        check("ctrl-u cleared the query",
+              "Fix pagination" in vis.split("> beta")[-1], vis[-900:])
+        check("stdout empty after clearing", out.strip() == "", repr(out[:200]))
 
         print("\n=== E: non-interactive output ===")
         r = subprocess.run([BIN, "--root", root, "--list", "--refresh"],
